@@ -1,0 +1,353 @@
+---
+title: "Vietnam War US Casualties"
+output: html_notebook
+---
+
+STUDENTS: Pierre Lanoë, Pierre Mercherz, William Lamazere, Myriam Klikel 
+
+Data and libraries upload. Please change the workspace directory below:   
+```{r}
+setwd("~/Documents/Cours /Msc/S1/R for Data Sciences/Vietnam War case ")
+vietnam<-read.csv('VietnamConflict.csv')
+coord=read.csv("US_coord.csv",header=T,sep=";") #table with coordinates, merged for mapping reasons
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(leaflet)
+library(class)
+library(rpart)
+library(rpart.plot)
+library(leaps)
+library(pROC)
+library(caret)
+library(glmnet)
+```
+
+## Description of the problem
+
+The objective is to give some information to families that lost relatives in the Vietnam Conflict. For that, we will predict how this person died (at combat? of his wounds?).
+
+We focus our studies on the soldiers who died before the end of the conflict (1975).
+
+## Data Cleaning
+
+We reformatted the dates for the variables BIRTH_YEAR, FATALITY_DATE and FATALITY_YEAR.
+We calculated a variable AGE for more convinience. 
+We created a variable DEATH_CONDITION to identify soldiers killed at combat. 
+
+```{r}
+vietnam <- vietnam %>% filter(FATALITY_YEAR <= 1975)
+
+vietnam$BIRTH_YEAR <- strptime(vietnam$BIRTH_YEAR,"%Y%m%d")
+vietnam$FATALITY_DATE <-strptime(vietnam$FATALITY_DATE, "%Y%m%d")
+vietnam$FATALITY_YEAR <- year(strptime(vietnam$FATALITY_YEAR,"%Y"))
+
+vietnam$AGE <- vietnam$FATALITY_YEAR-year(vietnam$BIRTH_YEAR)
+
+vietnam$DEATH_CONDITION<-as.numeric(vietnam$FATALITY=="KILLED IN ACTION")
+
+```
+
+
+## Mathematical problem
+
+The problem is to explain the output DEATH_CONDITION (did people die at combat?) by the other 30 variables. We will denote by Y the variable to explain:
+
+$$Y =
+\begin{cases}
+1 & \text{if the person} \text{ was killed in action} \\
+0 & \text{otherwise }
+\end{cases}$$
+
+The input variables represent information on the civil status, the enrollment, and the conditions during the war. Here the DEATH_CONDITION discriminant serves as a classification rule:
+
+$$g:\mathbb{R}^{30}→ {0,1} $$ such that
+
+$$ g(x) =
+\begin{cases}
+1 & \text{if P(Y=1|X=x) } \geq \text{s}  \\
+0 & \text{otherwise }
+\end{cases}$$
+
+for a threshold $$s \in \text{[0,1]}$$
+
+Thus, the problem is to estimate P(Y=1|X=x) the probability that a person was killed in action given the chosen input variables.
+
+We consider the following risks: PCC and AUC. These risks are estimated by comparing the observed values in the test set and the predicted values according to the model we have set on the train set. We do this to avoid overfitting.
+
+## Description of the dataset
+
+After adding the new variables, the dataset contains 58213 ovservations and 33 variables. Each row corresponds the a US soldier who died during the Vietnam war. 
+
+```{r}
+dim(vietnam)
+```
+
+#1. Causes of Deaths 
+
+```{r}
+vietnam%>%select(FATALITY)%>%group_by(FATALITY)%>%summarize(PERCENTAGE=round(n()/nrow(vietnam)*100))
+```
+
+70% of the soldiers died at combat. Thus, the objective of our modelisation is to get an accuracy higher than 70% (naive classification). 
+
+## Vizualisation of the dataset
+
+#1. Evolution of the number of deaths per year.  
+
+```{r}
+deathperyear <- vietnam %>% select(FATALITY_YEAR) %>% group_by(FATALITY_YEAR) %>% summarize(DEATH_COUNT=n())
+
+ggplot(deathperyear)+ aes(x=FATALITY_YEAR, y=DEATH_COUNT, group=1) + geom_line(color="steelblue") + geom_point(color="steelblue")+ggtitle("Number of deaths per year")+xlab("Year")+ylab("Number of Deaths")
+
+```
+
+We can observe a peek in war casualties in 1968. 
+
+#2. Which Province was the deadliest for the US troops ?
+
+```{r}
+deathpercountry<-vietnam %>% select(DEPLOYMENT_COUNTRY)%>% group_by(DEPLOYMENT_COUNTRY) %>% summarize(COUNT=n())
+
+ggplot(deathpercountry)+aes(x=DEPLOYMENT_COUNTRY, y=COUNT) +ggtitle("Deaths by Deployment Province") + geom_col(width=0.5, fill="steelblue")+theme(axis.text.x = element_text(size = 6) )
+
+```
+
+The South Vietnam was the deadliest region for the US Troops. 
+
+#3. Overview of the age of a soldier when got killed
+
+```{r}
+ggplot(vietnam)+ggtitle("Répartition de l'âge des soldats US")+aes(y=AGE)+geom_boxplot(fill="steelblue")
+```
+
+75% of the soldiers were between 20 and 25 years old when they got killed. 50% were between 20 and 21. 
+
+#4. Proportion of casualties according to the status (Active vs. Selected service). 
+
+
+```{r}
+statut<-vietnam %>% select(ENROLLMENT) %>% group_by(ENROLLMENT) %>% summarize(COUNT=n())
+
+total_active<-sum(statut[1:2,2])
+total_conscript<-sum(statut[,2])-total_active
+
+statut <- data.frame(statutnames = c("Active","Selected Service"), Nb_casualties = c(total_active,total_conscript))
+
+ggplot(statut) + aes(x=statutnames, y=Nb_casualties) + geom_bar(stat="identity", width=0.7, fill="steelblue")+ggtitle("Répartition appelés VS armée de métier")+xlab("Status")+ylab("Number of Deaths")
+
+```
+
+Active Service corresponds to the soldiers voluntarily enrolled in the military. 
+Selected Service are soldiers who were completing their military service as part their national duty. 
+
+
+#5. Which US State suffered the most during the war? 
+```{r}
+death_state=vietnam %>% select(HOME_STATE) %>% group_by(HOME_STATE) %>% summarise(COUNT=n())
+
+coord=left_join(death_state,coord,by=c("HOME_STATE"="STATE"))
+
+
+leaflet(coord %>% filter(HOME_STATE!="HAWAII",HOME_STATE!="ALASKA")) %>% addTiles() %>% addCircleMarkers(~LONG, ~LAT,weight=~COUNT/100,popup = ~ paste(as.character(HOME_STATE),"lost",as.character(COUNT),"soldiers"),radius=3)
+```
+
+The most impacted state is Calfornia (5574 casualties) which is expected as it is the most populated state in the US. 
+
+
+# 6.Which ethnicity suffered the most? 
+```{r}
+## Plot of proportion of casualties by ethnicity
+etn=vietnam %>% select(ETHNICITY_2) %>% group_by(ETHNICITY_2) %>% summarise(PERCENTAGE = n()*100/nrow(vietnam))
+
+ggplot(etn)+aes(x=ETHNICITY_2, y=PERCENTAGE) +ggtitle("Proportion of casualties by ethnicity") + geom_col(show.legend = TRUE,width=0.5, fill="steelblue")+coord_flip()
+```
+
+
+White and Black and African American count the highest number of casualties.  
+
+# 7. Proportion of casualties by military division
+```{r}
+## Plot of proportion of casualties by military division
+div <- vietnam %>% select(BRANCH) %>% group_by(BRANCH) %>% summarise(PERCENTAGE=n()*100/nrow(vietnam))
+
+ggplot(div)+aes(x=BRANCH, y=PERCENTAGE) +ggtitle("Proportion of casualties by military division") + geom_col(show.legend = TRUE,width=0.5, fill="steelblue")+ coord_flip()
+```
+
+
+
+## Machine Learning Models
+
+We propose the following models to explain the DEATH_CONDITION: Logistic regression, Lasso and Ridge classification, K nearest neighbors and Tree. 
+
+To shorten the computation time, we start to train our models on a sample of 1000 observations. We split this sample into a training and a testing dataset containing respectively 70% and 30% of the data. 
+
+When categorical variables had too many levels, we noticed that the train and the test dataset didn't match. Thus, we drop the variables with more than 25 levels. 
+
+```{r}
+
+drops <- c("STATE_CODE","RELIGION_CODE","DEPLOYMENT_COUNTRY_CODE","NATIONALITY","ETHNICITY_1","DEPLOYMENT_PROVINCE","DIVISION","FATALITY","FATALITY_DATE","BIRTH_YEAR","FATALITY_2","SEX","SERVICE_TYPE","POSITION","HOME_CITY","HOME_COUNTY","RANK","HOME_STATE","RELIGION")
+vietnam_log=vietnam[ , !(names(vietnam) %in% drops)]
+
+d=ncol(vietnam_log)
+
+set.seed(12345)
+index=sample(1:nrow(vietnam_log),1000)
+vietnam_log=vietnam_log[index,]
+
+set.seed(1234)
+n=nrow(vietnam_log)
+perm=sample(n)
+train=vietnam_log[perm[1:700],]
+test=vietnam_log[perm[701:n],]
+```
+
+#1.Logistic model
+
+In this model we assume that the logit transformation of the probability p(x)=P(Y=1|X=x) is linear.
+
+```{r}
+model_logistic=glm(DEATH_CONDITION~.,data=train,family = binomial)
+predict_logistic=predict(model_logistic,newdata=test,type="response")
+
+cutoff=0.5
+pred_log=as.numeric(predict_logistic>cutoff)
+
+PCC_log=mean(pred_log==test[,d]);PCC_log        
+```
+
+
+# 2. Logistic Lasso 
+
+In the lasso or ridge model, we assume also that the machine is linear but we constrain its coefficients in order to reduce the variance. The choice of the norm on B (the vector of coefficients) determines whether it is ridge (Euclidian Norm) or lasso (L1 norm).
+
+```{r}
+vietnam_LR <- vietnam_log
+for(i in 1:ncol(vietnam_LR)) {
+vietnam_LR[,i]=as.factor(as.numeric(vietnam_log[,i]))
+}
+
+train_LR=vietnam_LR[perm[1:700],]
+test_LR=vietnam_LR[perm[701:n],]
+
+train_LR = data.matrix(train_LR)
+train_LR[,d] = train_LR[,d]-1
+test_LR = data.matrix(test_LR)
+test_LR[,d] = test_LR[,d]-1
+
+mod.L <- glmnet(train_LR[,-d], train_LR[,d], alpha = 1)
+plot(mod.L)
+lasso.cv <- cv.glmnet(train_LR[,-d], train_LR[,d], alpha = 1)
+plot(lasso.cv)
+lasso.cv$lambda.min
+lasso.sel <- glmnet(train_LR[,-d], train_LR[,d], alpha = 1, lambda = lasso.cv$lambda.min)
+lasso.pred = predict(lasso.sel, test_LR[,-d], s="lambda.min")
+
+cutoff=0.5
+pred_lasso=as.numeric(lasso.pred>cutoff)
+PCC_lasso = mean(pred_lasso);PCC_lasso
+```
+
+# 3. Ridge Classification 
+
+```{r}
+mod.R <- glmnet(train_LR[,-d], train_LR[,d], alpha = 0)
+plot(mod.R)
+ridge.cv <- cv.glmnet(train_LR[,-d],train_LR[,d],lambda=exp(seq(-5,5,length=100)),alpha = 0)
+plot(ridge.cv)
+ridge.cv$lambda.min
+ridge.sel <- glmnet(train_LR[,-d], train_LR[,d], alpha = 0, lambda = ridge.cv$lambda.min)
+ridge.pred = predict(ridge.sel, test_LR[,-d], s="lambda.min")
+
+pred_ridge=as.numeric(ridge.pred>cutoff)
+PCC_ridge = mean(pred_ridge);PCC_ridge
+```
+
+
+# 4.Non-parametric model : K nearest neighbor model
+
+The K-nearest neighbor is a non-parametric model (less strong assumption on our machine) in which we look at the nearest observations of each individual and make a majority vote to determine the predicted class. This is a more local method.
+
+To fit the knn model we computed the PCC for k between 1 and 50. 
+When k increases, the accuracy gets worse. 
+Thus we fit our model with k = 1. 
+
+```{r}
+vietnam_knn = vietnam_log
+for(i in 1:ncol(vietnam_knn)) {
+vietnam_knn[,i]=as.factor(as.numeric(vietnam_log[,i]))
+}
+
+train_knn=vietnam_knn[perm[1:700],]
+test_knn=vietnam_knn[perm[701:n],]
+
+error <- rep(0,50)
+set.seed(123)
+for (i in 1:50){
+  prev <- knn(train_knn,test_knn,cl=train_knn$HOSTILITY_CONDITIONS,k=i)
+  error[i] <- mean(prev!=test_knn$HOSTILITY_CONDITIONS)
+}
+kopt <- which.min(error)
+kopt
+
+df <- data.frame(k=1:50,Error=error)
+ggplot(data=df)+aes(x=k,y=Error)+geom_line()+theme_classic()+ggtitle("error probability for each value of k")
+
+predict_knn=knn(train=train_knn[,-d],test=test_knn[,-d],cl=train_knn[,d],k=kopt)
+PCC_knn=mean(predict_knn==test_knn[,d]);PCC_knn
+
+```
+
+
+# 5. Tree based model
+
+```{r}
+tree=rpart(DEATH_CONDITION~.,data=train,cp=0.001)
+rpart.plot(tree)
+
+alpha_opt <- tree$cptable[which.min(tree$cptable[,"xerror"]),"CP"]
+tree2 <- prune(tree,cp=alpha_opt)
+
+data.prev=data.frame(simple=predict(tree2,newdata=test),large=predict(tree,newdata=test))
+
+PCC_trees <- data.prev %>% summarise_all(funs(mean(test$DEATH_CONDITION==.))) 
+PCC_tree = PCC_trees$large;PCC_tree
+
+```
+
+## Model Evaluation 
+
+# 1. PCC 
+```{r}
+PCC = data.frame(Logistic = PCC_log, LASSO = PCC_lasso, RIDGE = PCC_ridge, KNN = PCC_knn, TREE = PCC_tree);PCC
+```
+
+The logistic model gets the best results (91% accuracy on the test dataset). 
+
+If a less complex model is required, Lasso can also be a good fit as it gets a good accuracy and enables to drop some variables.  
+
+The tree model gets worse results than the naive classification. Thus, we drop this model. 
+
+# 2. AUC 
+ 
+```{r}
+roc.log <-roc(test[,d],pred_log)
+AUC_log = roc.log$auc
+
+roc.lasso <-roc(test_LR[,d], pred_lasso)
+AUC_lasso <- roc.lasso$auc
+
+predict_knn <- as.numeric(predict_knn)
+roc.knn<-roc(test_knn[,d], predict_knn)
+AUC_knn = roc.knn$auc
+
+
+plot(roc.log, col = "blue")
+plot(roc.lasso, col="black", add=T)
+plot(roc.knn, add=T, col = "red")
+
+
+AUC = data.frame(Logistic = AUC_log, LASSO = AUC_lasso, KNN = AUC_knn);AUC
+```
+
+According to the AUC criteria, the logistic model is once again the most efficient. 
